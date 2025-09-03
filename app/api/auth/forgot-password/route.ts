@@ -4,7 +4,7 @@ import { ApiResponseHelper, handleApiError } from '@/lib/response'
 import { rateLimit, emailRateLimit } from '@/lib/rate-limit'
 import { forgotPasswordSchema } from '@/lib/validation'
 import { EmailService } from '@/lib/email'
-import crypto from 'crypto'
+import { AuthService } from '@/lib/auth'
 
 export async function POST(request: NextRequest) {
   try {
@@ -35,7 +35,7 @@ export async function POST(request: NextRequest) {
     // But only send email if user exists
     if (user && user.status === 'ACTIVE') {
       // Generate reset token
-      const resetToken = crypto.randomBytes(32).toString('hex')
+      const resetToken = AuthService.generateRandomToken()
       const resetTokenExpiry = new Date(Date.now() + 3600000) // 1 hour from now
 
       // Save reset token to database
@@ -47,11 +47,11 @@ export async function POST(request: NextRequest) {
         }
       })
 
-      // Send reset email
-      const emailSent = await EmailService.sendPasswordResetEmail(
+      // Send reset email using the correct method name
+      const emailSent = await EmailService.sendPasswordReset(
         user.email,
-        user.name,
-        resetToken
+        resetToken,
+        user.name
       )
 
       if (!emailSent) {

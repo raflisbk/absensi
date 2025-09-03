@@ -1,8 +1,9 @@
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import bcrypt from 'bcrypt'
-import jwt from 'jsonwebtoken'
+import jwt, { SignOptions } from 'jsonwebtoken'
 import { z } from 'zod'
+import crypto from 'crypto'
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production'
 const SALT_ROUNDS = 12
@@ -17,11 +18,6 @@ interface JWTPayload {
   exp?: number
 }
 
-// JWT Options interface
-interface JWTOptions {
-  expiresIn: string | number
-}
-
 export class AuthService {
   static async hashPassword(password: string): Promise<string> {
     return bcrypt.hash(password, SALT_ROUNDS)
@@ -32,8 +28,12 @@ export class AuthService {
   }
 
   static generateToken(payload: Omit<JWTPayload, 'iat' | 'exp'>): string {
-    const options: JWTOptions = { expiresIn: '7d' }
+    const options: SignOptions = { expiresIn: '7d' }
     return jwt.sign(payload, JWT_SECRET, options)
+  }
+
+  static generateRandomToken(): string {
+    return crypto.randomBytes(32).toString('hex')
   }
 
   static verifyToken(token: string): JWTPayload | null {
@@ -100,10 +100,18 @@ export class AuthService {
     })
   }
 
+  static async revokeSession(sessionId: string): Promise<void> {
+    await this.deleteSession(sessionId)
+  }
+
   static async deleteUserSessions(userId: string): Promise<void> {
     await prisma.session.deleteMany({
       where: { userId }
     })
+  }
+
+  static async revokeAllUserSessions(userId: string): Promise<void> {
+    await this.deleteUserSessions(userId)
   }
 }
 

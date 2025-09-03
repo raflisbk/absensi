@@ -62,7 +62,7 @@ export async function POST(request: NextRequest) {
     // Create initial registration steps
     const registrationSteps = [
       'BASIC_INFO',
-      'DOCUMENT_VERIFICATION',
+      'DOCUMENT_VERIFICATION', 
       'FACE_ENROLLMENT',
       'EMAIL_VERIFICATION',
       'PHONE_VERIFICATION'
@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
       }))
     })
 
-    // Create email verification token
+    // Create email verification token using the correct method name
     const verificationToken = AuthService.generateRandomToken()
     const expiresAt = new Date()
     expiresAt.setHours(expiresAt.getHours() + 24) // 24 hours
@@ -100,8 +100,10 @@ export async function POST(request: NextRequest) {
       registrationSteps: registrationSteps.map(step => ({
         stepName: step,
         status: step === 'BASIC_INFO' ? 'COMPLETED' : 'PENDING'
-      }))
-    }, 'Registration successful. Please check your email to verify your account.')
+      })),
+      nextStep: 'EMAIL_VERIFICATION',
+      message: 'Registration successful! Please check your email for verification.'
+    }, 'User registered successfully')
 
   } catch (error) {
     return handleApiError(error)

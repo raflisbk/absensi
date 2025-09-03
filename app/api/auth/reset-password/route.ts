@@ -22,48 +22,65 @@ export async function POST(request: NextRequest) {
 
     const { token, password } = validation.data
 
-    // Find reset token
-    const resetRecord = await prisma.passwordReset.findUnique({
-      where: { token }
+    // Find valid reset token
+    const resetToken = await prisma.passwordResetToken.findUnique({
+      where: { token },
+      include: {
+        user: true
+      }
     })
 
-    if (!resetRecord) {
-      return ApiResponseHelper.error('Invalid reset token', 400)
+    if (!resetToken) {
+      return ApiResponseHelper.error('Invalid or expired reset token', 400)
     }
 
-    if (resetRecord.used) {
-      return ApiResponseHelper.error('Reset token has already been used', 400)
-    }
-
-    if (resetRecord.expiresAt < new Date()) {
-      // Delete expired token
-      await prisma.passwordReset.delete({
-        where: { id: resetRecord.id }
+    if (resetToken.expiresAt < new Date()) {
+      // Clean up expired token
+      await prisma.passwordResetToken.delete({
+        where: { token }
       })
       return ApiResponseHelper.error('Reset token has expired', 400)
+    }
+
+    if (resetToken.used) {
+      return ApiResponseHelper.error('Reset token has already been used', 400)
     }
 
     // Hash new password
     const hashedPassword = await AuthService.hashPassword(password)
 
-    // Update user password
-    const user = await prisma.user.update({
-      where: { email: resetRecord.email },
-      data: { password: hashedPassword }
+    // Start transaction to update password and revoke sessions
+    await prisma.$transaction(async (tx) => {
+      // Update user password
+      await tx.user.update({
+        where: { id: resetToken.userId },
+        data: {
+          password: hashedPassword,
+          updatedAt: new Date()
+        }
+      })
+
+      // Mark token as used
+      await tx.passwordResetToken.update({
+        where: { token },
+        data: {
+          used: true,
+          usedAt: new Date()
+        }
+      })
     })
 
-    // Mark token as used
-    await prisma.passwordReset.update({
-      where: { id: resetRecord.id },
-      data: { used: true }
-    })
-
-    // Revoke all existing sessions for security
-    await AuthService.revokeAllUserSessions(user.id)
+    // Revoke all user sessions for security using the correct method name
+    try {
+      await AuthService.revokeAllUserSessions(resetToken.userId)
+    } catch (error) {
+      // Log error but don't fail the request
+      console.error('Failed to revoke user sessions:', error)
+    }
 
     return ApiResponseHelper.success(
       null,
-      'Password reset successful. Please log in with your new password.'
+      'Password reset successfully. Please login with your new password.'
     )
 
   } catch (error) {
