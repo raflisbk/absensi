@@ -1,32 +1,135 @@
 "use client"
 
-import type React from "react"
-
-import { useState } from "react"
+import React, { useState } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Shield, Eye, EyeOff, User, Mail, GraduationCap } from "lucide-react"
+import { Progress } from "@/components/ui/progress"
+import { Shield, User, Mail, GraduationCap, Phone, Loader2 } from "lucide-react"
+import { toast } from "sonner"
 
-export default function RegisterPage() {
-  const [showPassword, setShowPassword] = useState(false)
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
+export default function RegisterStep1Page() {
+  const [isLoading, setIsLoading] = useState(false)
   const [formData, setFormData] = useState({
-    fullName: "",
+    name: "",
     email: "",
     studentId: "",
+    phone: "",
     role: "",
     password: "",
     confirmPassword: "",
   })
+  
+  const router = useRouter()
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const validateForm = () => {
+    if (!formData.name.trim()) {
+      toast.error("Nama lengkap harus diisi")
+      return false
+    }
+    
+    if (!formData.email.trim()) {
+      toast.error("Email harus diisi")
+      return false
+    }
+    
+    if (!formData.email.includes("@")) {
+      toast.error("Format email tidak valid")
+      return false
+    }
+    
+    if (!formData.studentId.trim()) {
+      toast.error("NIM/NIP harus diisi")
+      return false
+    }
+    
+    if (!formData.phone.trim()) {
+      toast.error("Nomor telepon harus diisi")
+      return false
+    }
+    
+    if (!formData.role) {
+      toast.error("Role harus dipilih")
+      return false
+    }
+    
+    if (formData.password.length < 8) {
+      toast.error("Password minimal 8 karakter")
+      return false
+    }
+    
+    const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/
+    if (!passwordRegex.test(formData.password)) {
+      toast.error("Password harus mengandung minimal 1 huruf kecil, 1 huruf besar, dan 1 angka")
+      return false
+    }
+    
+    if (formData.password !== formData.confirmPassword) {
+      toast.error("Konfirmasi password tidak cocok")
+      return false
+    }
+    
+    return true
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    // TODO: Implement registration logic
-    console.log("Registration attempt:", formData)
+    
+    if (!validateForm()) {
+      return
+    }
+    
+    setIsLoading(true)
+    
+    try {
+      const response = await fetch('/api/auth/register/step-1', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: formData.name,
+          email: formData.email,
+          studentId: formData.studentId,
+          phone: formData.phone,
+          role: formData.role as 'STUDENT' | 'LECTURER',
+          password: formData.password,
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        console.error('Registration Step 1 error:', data)
+        
+        if (data.fieldErrors) {
+          const errors = Object.entries(data.fieldErrors).map(([field, messages]: [string, any]) => 
+            `${field}: ${Array.isArray(messages) ? messages.join(', ') : messages}`
+          ).join('\n')
+          throw new Error(`Validation failed:\n${errors}`)
+        }
+        
+        throw new Error(data.error || 'Registration step 1 failed')
+      }
+
+      toast.success('Step 1 berhasil! Melanjutkan ke verifikasi dokumen...')
+      
+      // Store user ID for next steps
+      sessionStorage.setItem('registrationUserId', data.user.id)
+      sessionStorage.setItem('registrationEmail', data.user.email)
+      
+      // Redirect to step 2
+      router.push('/register/step-2')
+      
+    } catch (error: any) {
+      toast.error(error.message || 'Terjadi kesalahan saat registrasi')
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   return (
@@ -36,32 +139,44 @@ export default function RegisterPage() {
         <div className="text-center mb-8">
           <Link href="/" className="inline-flex items-center space-x-2 mb-6">
             <Shield className="h-8 w-8 text-primary" />
-            <span className="text-2xl font-bold text-foreground">EduAttend</span>
+            <span className="text-2xl font-bold text-foreground">FaceAttend</span>
           </Link>
-          <h1 className="text-3xl font-bold text-foreground mb-2">Daftar Akun Baru</h1>
-          <p className="text-muted-foreground">Buat akun untuk mengakses sistem absensi institusi pendidikan</p>
+          <h1 className="text-3xl font-bold text-foreground mb-2">Registrasi Akun</h1>
+          <p className="text-muted-foreground">Step 1 dari 4: Informasi Dasar</p>
         </div>
 
-        {/* Registration Form */}
+        {/* Progress Bar */}
+        <div className="mb-6">
+          <Progress value={25} className="w-full" />
+          <div className="flex justify-between text-sm text-muted-foreground mt-2">
+            <span className="font-medium text-primary">Informasi Dasar</span>
+            <span>Dokumen</span>
+            <span>Foto Wajah</span>
+            <span>Verifikasi</span>
+          </div>
+        </div>
+
+        {/* Registration Form Step 1 */}
         <Card>
           <CardHeader>
-            <CardTitle>Registrasi</CardTitle>
-            <CardDescription>Lengkapi informasi di bawah untuk membuat akun</CardDescription>
+            <CardTitle>Informasi Dasar</CardTitle>
+            <CardDescription>Lengkapi informasi pribadi Anda untuk membuat akun</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="fullName">Nama Lengkap</Label>
+                <Label htmlFor="name">Nama Lengkap</Label>
                 <div className="relative">
                   <User className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
                   <Input
-                    id="fullName"
+                    id="name"
                     type="text"
                     placeholder="Masukkan nama lengkap"
                     className="pl-10"
-                    value={formData.fullName}
-                    onChange={(e) => setFormData({ ...formData, fullName: e.target.value })}
+                    value={formData.name}
+                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                     required
+                    disabled={isLoading}
                   />
                 </div>
               </div>
@@ -78,6 +193,7 @@ export default function RegisterPage() {
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                     required
+                    disabled={isLoading}
                   />
                 </div>
               </div>
@@ -94,80 +210,81 @@ export default function RegisterPage() {
                     value={formData.studentId}
                     onChange={(e) => setFormData({ ...formData, studentId: e.target.value })}
                     required
+                    disabled={isLoading}
                   />
                 </div>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="role">Role</Label>
-                <Select value={formData.role} onValueChange={(value) => setFormData({ ...formData, role: value })}>
+                <Label htmlFor="phone">Nomor Telepon</Label>
+                <div className="relative">
+                  <Phone className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    id="phone"
+                    type="tel"
+                    placeholder="08xxxxxxxxxx"
+                    className="pl-10"
+                    value={formData.phone}
+                    onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                    required
+                    disabled={isLoading}
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="role">Status</Label>
+                <Select 
+                  value={formData.role} 
+                  onValueChange={(value) => setFormData({ ...formData, role: value })}
+                  disabled={isLoading}
+                >
                   <SelectTrigger>
-                    <SelectValue placeholder="Pilih role Anda" />
+                    <SelectValue placeholder="Pilih status Anda" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="student">Siswa</SelectItem>
-                    <SelectItem value="lecturer">Pengajar</SelectItem>
-                    <SelectItem value="admin">Administrator</SelectItem>
+                    <SelectItem value="STUDENT">Siswa/Mahasiswa</SelectItem>
+                    <SelectItem value="LECTURER">Pengajar/Dosen</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="password">Password</Label>
-                <div className="relative">
-                  <Input
-                    id="password"
-                    type={showPassword ? "text" : "password"}
-                    placeholder="Buat password yang kuat"
-                    value={formData.password}
-                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                    required
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="absolute right-0 top-0 h-full px-3 py-2 hover:bg-transparent"
-                    onClick={() => setShowPassword(!showPassword)}
-                  >
-                    {showPassword ? (
-                      <EyeOff className="h-4 w-4 text-muted-foreground" />
-                    ) : (
-                      <Eye className="h-4 w-4 text-muted-foreground" />
-                    )}
-                  </Button>
-                </div>
+                <Input
+                  id="password"
+                  type="password"
+                  placeholder="Min 8 karakter (huruf besar, kecil, angka)"
+                  value={formData.password}
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                  required
+                  disabled={isLoading}
+                  minLength={8}
+                />
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="confirmPassword">Konfirmasi Password</Label>
-                <div className="relative">
-                  <Input
-                    id="confirmPassword"
-                    type={showConfirmPassword ? "text" : "password"}
-                    placeholder="Ulangi password"
-                    value={formData.confirmPassword}
-                    onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
-                    required
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="absolute right-0 top-0 h-full px-3 py-2 hover:bg-transparent"
-                    onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                  >
-                    {showConfirmPassword ? (
-                      <EyeOff className="h-4 w-4 text-muted-foreground" />
-                    ) : (
-                      <Eye className="h-4 w-4 text-muted-foreground" />
-                    )}
-                  </Button>
-                </div>
+                <Input
+                  id="confirmPassword"
+                  type="password"
+                  placeholder="Ulangi password"
+                  value={formData.confirmPassword}
+                  onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
+                  required
+                  disabled={isLoading}
+                />
               </div>
 
-              <Button type="submit" className="w-full">
-                Daftar Sekarang
+              <Button type="submit" className="w-full" disabled={isLoading}>
+                {isLoading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Memproses...
+                  </>
+                ) : (
+                  "Lanjutkan ke Step 2"
+                )}
               </Button>
             </form>
 
@@ -189,8 +306,7 @@ export default function RegisterPage() {
             <div>
               <h3 className="font-medium text-foreground mb-1">Privasi & Keamanan</h3>
               <p className="text-sm text-muted-foreground">
-                Data biometrik Anda akan dienkripsi dan disimpan dengan standar keamanan tinggi sesuai regulasi
-                perlindungan data.
+                Data pribadi dan biometrik Anda akan dienkripsi dan disimpan sesuai standar keamanan tinggi.
               </p>
             </div>
           </div>
