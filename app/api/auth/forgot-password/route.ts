@@ -1,17 +1,20 @@
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { AuthService } from '@/lib/auth'
-import { EmailService } from '@/lib/email'
-import { forgotPasswordSchema } from '@/lib/validation'
 import { ApiResponseHelper, handleApiError } from '@/lib/response'
 import { rateLimit, emailRateLimit } from '@/lib/rate-limit'
+import { forgotPasswordSchema } from '@/lib/validation'
+import { EmailService } from '@/lib/email'
+import crypto from 'crypto'
 
 export async function POST(request: NextRequest) {
   try {
-    // Rate limiting
+    // Rate limiting for password reset requests
     const rateLimitResult = await rateLimit(request, emailRateLimit)
     if (!rateLimitResult.success) {
-      return ApiResponseHelper.error(rateLimitResult.error!, 429)
+      return ApiResponseHelper.error(
+        'Too many password reset requests. Please try again later.',
+        429
+      )
     }
 
     const body = await request.json()
@@ -23,43 +26,43 @@ export async function POST(request: NextRequest) {
 
     const { email } = validation.data
 
-    // Check if user exists
+    // Find user by email
     const user = await prisma.user.findUnique({
       where: { email }
     })
 
-    if (!user) {
-      // Don't reveal if email exists or not for security
-      return ApiResponseHelper.success(
-        null,
-        'If the email exists in our system, a password reset link will be sent.'
+    // Always return success to prevent email enumeration attacks
+    // But only send email if user exists
+    if (user && user.status === 'ACTIVE') {
+      // Generate reset token
+      const resetToken = crypto.randomBytes(32).toString('hex')
+      const resetTokenExpiry = new Date(Date.now() + 3600000) // 1 hour from now
+
+      // Save reset token to database
+      await prisma.passwordResetToken.create({
+        data: {
+          userId: user.id,
+          token: resetToken,
+          expiresAt: resetTokenExpiry
+        }
+      })
+
+      // Send reset email
+      const emailSent = await EmailService.sendPasswordResetEmail(
+        user.email,
+        user.name,
+        resetToken
       )
-    }
 
-    // Delete existing reset tokens for this email
-    await prisma.passwordReset.deleteMany({
-      where: { email }
-    })
-
-    // Create new reset token
-    const resetToken = AuthService.generateRandomToken()
-    const expiresAt = new Date()
-    expiresAt.setHours(expiresAt.getHours() + 1) // 1 hour
-
-    await prisma.passwordReset.create({
-      data: {
-        email,
-        token: resetToken,
-        expiresAt
+      if (!emailSent) {
+        // Log the error but don't reveal it to the user
+        console.error('Failed to send password reset email to:', email)
       }
-    })
-
-    // Send password reset email
-    await EmailService.sendPasswordReset(email, resetToken, user.name)
+    }
 
     return ApiResponseHelper.success(
       null,
-      'If the email exists in our system, a password reset link will be sent.'
+      'If an account with that email exists, we\'ve sent a password reset link.'
     )
 
   } catch (error) {

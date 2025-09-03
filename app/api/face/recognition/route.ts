@@ -1,9 +1,87 @@
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { requireAuth, getClientIP } from '@/lib/auth'
-import { faceRecognitionSchema } from '@/lib/validation'
+import { requireAuth } from '@/lib/auth'
 import { ApiResponseHelper, handleApiError } from '@/lib/response'
 import { rateLimit, faceRecognitionRateLimit } from '@/lib/rate-limit'
+import { faceRecognitionSchema } from '@/lib/validation'
+
+// Face similarity threshold
+const FACE_SIMILARITY_THRESHOLD = 0.6
+
+// Calculate Euclidean distance between two face descriptors
+function calculateDistance(descriptors1: number[], descriptors2: number[]): number {
+  if (descriptors1.length !== descriptors2.length) {
+    throw new Error('Face descriptor lengths do not match')
+  }
+
+  let sum = 0
+  for (let i = 0; i < descriptors1.length; i++) {
+    const diff = descriptors1[i] - descriptors2[i]
+    sum += diff * diff
+  }
+
+  return Math.sqrt(sum)
+}
+
+// Verify location based on WiFi and GPS
+async function verifyLocation(
+  classId: string,
+  wifiSsid?: string,
+  gpsLat?: number,
+  gpsLng?: number
+): Promise<{ valid: boolean; reason?: string }> {
+  const classInfo = await prisma.class.findUnique({
+    where: { id: classId },
+    include: {
+      room: true
+    }
+  })
+
+  if (!classInfo || !classInfo.room) {
+    return { valid: false, reason: 'Class or room information not found' }
+  }
+
+  // Check WiFi SSID if provided
+  if (wifiSsid && classInfo.room.allowedWifiSSIDs) {
+    const allowedSSIDs = classInfo.room.allowedWifiSSIDs as string[]
+    if (!allowedSSIDs.includes(wifiSsid)) {
+      return { valid: false, reason: 'WiFi network not allowed for this location' }
+    }
+  }
+
+  // Check GPS coordinates if provided
+  if (gpsLat && gpsLng && classInfo.room.latitude && classInfo.room.longitude) {
+    const distance = calculateGPSDistance(
+      gpsLat,
+      gpsLng,
+      classInfo.room.latitude,
+      classInfo.room.longitude
+    )
+    
+    const maxDistance = classInfo.room.radius || 50 // Default 50 meters
+    if (distance > maxDistance) {
+      return { valid: false, reason: 'Location too far from classroom' }
+    }
+  }
+
+  return { valid: true }
+}
+
+// Calculate GPS distance in meters
+function calculateGPSDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371e3 // Earth's radius in meters
+  const φ1 = lat1 * Math.PI / 180
+  const φ2 = lat2 * Math.PI / 180
+  const Δφ = (lat2 - lat1) * Math.PI / 180
+  const Δλ = (lng2 - lng1) * Math.PI / 180
+
+  const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+            Math.cos(φ1) * Math.cos(φ2) *
+            Math.sin(Δλ/2) * Math.sin(Δλ/2)
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
+
+  return R * c // Distance in meters
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -13,89 +91,83 @@ export async function POST(request: NextRequest) {
       return ApiResponseHelper.error(rateLimitResult.error!, 429)
     }
 
-    const user = await requireAuth(request)
+    const currentUser = await requireAuth(request, ['STUDENT'])
     const body = await request.json()
-    const validation = faceRecognitionSchema.safeParse(body)
 
+    const validation = faceRecognitionSchema.safeParse(body)
     if (!validation.success) {
       return ApiResponseHelper.validationError(validation.error.flatten().fieldErrors)
     }
 
     const { faceDescriptors, classId, wifiSsid, gpsLat, gpsLng, deviceInfo } = validation.data
 
-    // Get user's face profile
-    const faceProfile = await prisma.faceProfile.findFirst({
-      where: { userId: user.id }
+    // Get user's enrolled face profile
+    const faceProfile = await prisma.faceProfile.findUnique({
+      where: { userId: currentUser.id }
     })
 
-    if (!faceProfile) {
-      return ApiResponseHelper.error('Face profile not found. Please complete face enrollment first.', 400)
+    if (!faceProfile || faceProfile.enrollmentStatus !== 'COMPLETED') {
+      return ApiResponseHelper.error(
+        'Face enrollment not completed. Please complete face enrollment first.',
+        400
+      )
     }
 
-    // Get class information
-    const classInfo = await prisma.class.findUnique({
-      where: { id: classId },
+    // Parse stored face descriptors
+    let storedDescriptors: number[]
+    try {
+      storedDescriptors = JSON.parse(faceProfile.faceDescriptors)
+    } catch (error) {
+      return ApiResponseHelper.error('Invalid stored face data', 500)
+    }
+
+    // Calculate face similarity
+    const distance = calculateDistance(faceDescriptors, storedDescriptors)
+    const similarity = 1 - distance // Convert distance to similarity score
+    
+    if (similarity < FACE_SIMILARITY_THRESHOLD) {
+      return ApiResponseHelper.error(
+        'Face verification failed. Please try again or update your face profile.',
+        401
+      )
+    }
+
+    // Verify class exists and user is enrolled
+    const enrollment = await prisma.enrollment.findFirst({
+      where: {
+        userId: currentUser.id,
+        classId: classId,
+        status: 'ACTIVE'
+      },
       include: {
-        location: true,
-        enrollments: {
-          where: { userId: user.id, status: 'ACTIVE' }
+        class: {
+          include: {
+            room: true
+          }
         }
       }
     })
 
-    if (!classInfo) {
-      return ApiResponseHelper.notFound('Class not found')
-    }
-
-    if (classInfo.enrollments.length === 0) {
+    if (!enrollment) {
       return ApiResponseHelper.error('You are not enrolled in this class', 403)
     }
 
-    // Validate WiFi network if provided
-    if (wifiSsid && classInfo.location.wifiSsid !== wifiSsid) {
-      return ApiResponseHelper.error('Invalid location. Please connect to the correct WiFi network.', 403)
-    }
-
-    // Validate class schedule
+    // Check if class is currently active
     const now = new Date()
-    const schedule = classInfo.schedule as any
-    const currentDay = now.getDay()
-    const currentTime = now.getHours() * 60 + now.getMinutes()
+    const classStart = new Date(enrollment.class.startTime)
+    const classEnd = new Date(enrollment.class.endTime)
     
-    // Convert schedule time to minutes
-    const [startHour, startMin] = schedule.startTime.split(':').map(Number)
-    const [endHour, endMin] = schedule.endTime.split(':').map(Number)
-    const startTime = startHour * 60 + startMin
-    const endTime = endHour * 60 + endMin
-
-    if (schedule.dayOfWeek !== currentDay) {
-      return ApiResponseHelper.error('This class is not scheduled for today', 400)
+    if (now < classStart || now > classEnd) {
+      return ApiResponseHelper.error('Class is not currently active', 400)
     }
 
-    // Allow check-in 15 minutes before class starts and during class
-    const checkInWindow = 15 // minutes
-    if (currentTime < (startTime - checkInWindow) || currentTime > endTime) {
-      return ApiResponseHelper.error('Check-in is not available at this time', 400)
+    // Verify location
+    const locationVerification = await verifyLocation(classId, wifiSsid, gpsLat, gpsLng)
+    if (!locationVerification.valid) {
+      return ApiResponseHelper.error(locationVerification.reason!, 400)
     }
 
-    // Compare face descriptors
-    const storedDescriptors = faceProfile.faceDescriptors as number[]
-    const confidence = calculateFaceConfidence(storedDescriptors, faceDescriptors)
-
-    if (confidence < faceProfile.confidenceThreshold) {
-      // Log failed attempt
-      await prisma.faceQualityLog.create({
-        data: {
-          userId: user.id,
-          qualityScores: { confidence },
-          validationResults: { success: false, reason: 'Low confidence score' }
-        }
-      })
-
-      return ApiResponseHelper.error('Face recognition failed. Please try again.', 400)
-    }
-
-    // Check if user already checked in for this class today
+    // Check if attendance already exists for today
     const today = new Date()
     today.setHours(0, 0, 0, 0)
     const tomorrow = new Date(today)
@@ -103,9 +175,9 @@ export async function POST(request: NextRequest) {
 
     const existingAttendance = await prisma.attendance.findFirst({
       where: {
-        userId: user.id,
+        userId: currentUser.id,
         classId: classId,
-        timestamp: {
+        createdAt: {
           gte: today,
           lt: tomorrow
         }
@@ -113,71 +185,61 @@ export async function POST(request: NextRequest) {
     })
 
     if (existingAttendance) {
-      return ApiResponseHelper.error('You have already checked in for this class today', 400)
+      return ApiResponseHelper.error('Attendance already recorded for today', 409)
     }
 
     // Determine attendance status based on time
-    let status = 'PRESENT'
-    const lateThreshold = 10 // minutes after start time
-    if (currentTime > (startTime + lateThreshold)) {
+    const lateThreshold = new Date(classStart)
+    lateThreshold.setMinutes(lateThreshold.getMinutes() + 15) // 15 minutes late threshold
+
+    let status: 'PRESENT' | 'LATE' = 'PRESENT'
+    if (now > lateThreshold) {
       status = 'LATE'
     }
 
     // Create attendance record
     const attendance = await prisma.attendance.create({
       data: {
-        userId: user.id,
+        userId: currentUser.id,
         classId: classId,
-        method: 'FACE_RECOGNITION',
-        ipAddress: getClientIP(request),
-        wifiSsid: wifiSsid,
-        confidenceScore: confidence,
-        deviceInfo: deviceInfo,
-        gpsLat: gpsLat,
-        gpsLng: gpsLng,
-        status: status as any
+        status: status,
+        checkInTime: now,
+        faceMatchScore: similarity,
+        wifiSsid: wifiSsid || null,
+        gpsCoordinates: gpsLat && gpsLng ? JSON.stringify({ lat: gpsLat, lng: gpsLng }) : null,
+        deviceInfo: deviceInfo ? JSON.stringify(deviceInfo) : null,
+        createdAt: now,
+        updatedAt: now
+      },
+      include: {
+        class: {
+          select: {
+            id: true,
+            name: true,
+            code: true,
+            room: {
+              select: {
+                name: true,
+                building: true
+              }
+            }
+          }
+        }
       }
     })
 
-    // Log successful attempt
-    await prisma.faceQualityLog.create({
-      data: {
-        userId: user.id,
-        qualityScores: { confidence },
-        validationResults: { success: true, attendanceId: attendance.id }
-      }
-    })
-
-    return ApiResponseHelper.created({
-      attendanceId: attendance.id,
-      status: status,
-      confidence: confidence,
-      timestamp: attendance.timestamp
-    }, `Attendance recorded successfully (${status})`)
+    return ApiResponseHelper.created(
+      {
+        id: attendance.id,
+        status: attendance.status,
+        checkInTime: attendance.checkInTime,
+        faceMatchScore: attendance.faceMatchScore,
+        class: attendance.class
+      },
+      `Attendance recorded successfully as ${status}`
+    )
 
   } catch (error) {
     return handleApiError(error)
   }
-}
-
-function calculateFaceConfidence(stored: number[], current: number[]): number {
-  if (stored.length !== current.length || stored.length === 0) {
-    return 0
-  }
-
-  // Calculate Euclidean distance
-  let sumSquares = 0
-  for (let i = 0; i < stored.length; i++) {
-    const diff = stored[i] - current[i]
-    sumSquares += diff * diff
-  }
-  
-  const distance = Math.sqrt(sumSquares)
-  
-  // Convert distance to confidence score (0-1)
-  // Lower distance = higher confidence
-  const maxDistance = 1.0 // Threshold for maximum distance
-  const confidence = Math.max(0, 1 - (distance / maxDistance))
-  
-  return Math.round(confidence * 1000) / 1000 // Round to 3 decimal places
 }
