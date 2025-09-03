@@ -1,9 +1,65 @@
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { requireAuth } from '@/lib/auth'
-import { updateUserSchema, paginationSchema } from '@/lib/validation'
 import { ApiResponseHelper, handleApiError } from '@/lib/response'
 import { rateLimit, apiRateLimit } from '@/lib/rate-limit'
+import { z } from 'zod'
+
+const getUsersSchema = z.object({
+  page: z.number().min(1).default(1),
+  limit: z.number().min(1).max(100).default(10),
+  search: z.string().optional(),
+  role: z.enum(['ADMIN', 'LECTURER', 'STUDENT']).optional(),
+  status: z.enum(['PENDING', 'ACTIVE', 'SUSPENDED', 'REJECTED']).optional(),
+  sortBy: z.enum(['createdAt', 'updatedAt', 'name', 'email']).default('createdAt'),
+  sortOrder: z.enum(['asc', 'desc']).default('desc')
+})
+
+const updateUserSchema = z.object({
+  userId: z.string().min(1, 'User ID is required'),
+  name: z.string().min(1, 'Name is required').optional(),
+  email: z.string().email('Invalid email format').optional(),
+  role: z.enum(['ADMIN', 'LECTURER', 'STUDENT']).optional(),
+  status: z.enum(['PENDING', 'ACTIVE', 'SUSPENDED', 'REJECTED']).optional(),
+  studentId: z.string().optional(),
+  phone: z.string().optional(),
+  documentVerified: z.boolean().optional(),
+  emailVerified: z.boolean().optional(),
+  phoneVerified: z.boolean().optional()
+})
+
+const deleteUsersSchema = z.object({
+  userIds: z.array(z.string()).min(1, 'At least one user ID is required')
+})
+
+interface UserFilters {
+  search?: string
+  role?: 'ADMIN' | 'LECTURER' | 'STUDENT'
+  status?: 'PENDING' | 'ACTIVE' | 'SUSPENDED' | 'REJECTED'
+}
+
+async function buildUserWhereClause(filters: UserFilters): Promise<any> {
+  const whereClause: any = {}
+
+  if (filters.search) {
+    whereClause.OR = [
+      { name: { contains: filters.search, mode: 'insensitive' } },
+      { email: { contains: filters.search, mode: 'insensitive' } },
+      { studentId: { contains: filters.search, mode: 'insensitive' } },
+      { phone: { contains: filters.search, mode: 'insensitive' } }
+    ]
+  }
+
+  if (filters.role) {
+    whereClause.role = filters.role
+  }
+
+  if (filters.status) {
+    whereClause.status = filters.status
+  }
+
+  return whereClause
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -13,43 +69,40 @@ export async function GET(request: NextRequest) {
       return ApiResponseHelper.error(rateLimitResult.error!, 429)
     }
 
-    const user = await requireAuth(request, ['ADMIN'])
+    const currentUser = await requireAuth(request, ['ADMIN', 'LECTURER'])
     const { searchParams } = new URL(request.url)
     
     const queryParams = {
-      page: searchParams.get('page') || '1',
-      limit: searchParams.get('limit') || '10',
-      search: searchParams.get('search'),
-      sortBy: searchParams.get('sortBy'),
-      sortOrder: searchParams.get('sortOrder') || 'desc'
+      page: parseInt(searchParams.get('page') || '1'),
+      limit: parseInt(searchParams.get('limit') || '10'),
+      search: searchParams.get('search') || undefined,
+      role: searchParams.get('role') as 'ADMIN' | 'LECTURER' | 'STUDENT' | undefined,
+      status: searchParams.get('status') as 'PENDING' | 'ACTIVE' | 'SUSPENDED' | 'REJECTED' | undefined,
+      sortBy: (searchParams.get('sortBy') || 'createdAt') as 'createdAt' | 'updatedAt' | 'name' | 'email',
+      sortOrder: (searchParams.get('sortOrder') || 'desc') as 'asc' | 'desc'
     }
 
-    const validation = paginationSchema.safeParse(queryParams)
+    const validation = getUsersSchema.safeParse(queryParams)
     if (!validation.success) {
       return ApiResponseHelper.validationError(validation.error.flatten().fieldErrors)
     }
 
-    const { page, limit, search, sortBy, sortOrder } = validation.data
-    const role = searchParams.get('role')
-    const status = searchParams.get('status')
+    const { page, limit, search, role, status, sortBy, sortOrder } = validation.data
 
-    // Build where clause
-    let whereClause: any = {}
+    // Build filters
+    const filters: UserFilters = { search, role, status }
+    const whereClause = await buildUserWhereClause(filters)
 
-    if (search) {
-      whereClause.OR = [
-        { name: { contains: search, mode: 'insensitive' } },
-        { email: { contains: search, mode: 'insensitive' } },
-        { studentId: { contains: search, mode: 'insensitive' } }
-      ]
-    }
-
-    if (role) {
-      whereClause.role = role
-    }
-
-    if (status) {
-      whereClause.status = status
+    // For lecturers, only show students in their classes
+    if (currentUser.role === 'LECTURER') {
+      whereClause.role = 'STUDENT'
+      whereClause.enrollments = {
+        some: {
+          class: {
+            lecturerId: currentUser.id
+          }
+        }
+      }
     }
 
     // Get total count
@@ -58,10 +111,7 @@ export async function GET(request: NextRequest) {
     })
 
     // Build order by
-    let orderBy: any = { createdAt: sortOrder }
-    if (sortBy) {
-      orderBy = { [sortBy]: sortOrder }
-    }
+    const orderBy: any = { [sortBy]: sortOrder }
 
     // Get paginated results
     const users = await prisma.user.findMany({
@@ -186,75 +236,61 @@ export async function DELETE(request: NextRequest) {
 
     const currentUser = await requireAuth(request, ['ADMIN'])
     const { searchParams } = new URL(request.url)
-    const userId = searchParams.get('userId')
+    const body = await request.json()
 
-    if (!userId) {
-      return ApiResponseHelper.error('User ID is required', 400)
+    // Handle single user deletion via query param
+    const userIdParam = searchParams.get('userId')
+    if (userIdParam) {
+      const userExists = await prisma.user.findUnique({
+        where: { id: userIdParam }
+      })
+
+      if (!userExists) {
+        return ApiResponseHelper.notFound('User not found')
+      }
+
+      // Prevent self-deletion
+      if (userIdParam === currentUser.id) {
+        return ApiResponseHelper.error('You cannot delete your own account', 400)
+      }
+
+      await prisma.user.delete({
+        where: { id: userIdParam }
+      })
+
+      return ApiResponseHelper.success(null, 'User deleted successfully')
     }
 
-    // Prevent admin from deleting themselves
-    if (userId === currentUser.id) {
-      return ApiResponseHelper.error('Cannot delete your own account', 400)
+    // Handle bulk deletion via request body
+    const validation = deleteUsersSchema.safeParse(body)
+    if (!validation.success) {
+      return ApiResponseHelper.validationError(validation.error.flatten().fieldErrors)
     }
 
-    // Check if user exists
-    const user = await prisma.user.findUnique({
-      where: { id: userId }
+    const { userIds } = validation.data
+
+    // Prevent self-deletion in bulk
+    if (userIds.includes(currentUser.id)) {
+      return ApiResponseHelper.error('You cannot delete your own account', 400)
+    }
+
+    // Delete users in transaction
+    const result = await prisma.$transaction(async (tx: any) => {
+      const deletedUsers = await tx.user.deleteMany({
+        where: {
+          id: {
+            in: userIds
+          }
+        }
+      })
+
+      return deletedUsers
     })
 
-    if (!user) {
-      return ApiResponseHelper.notFound('User not found')
-    }
-
-    // Delete related records first
-    await prisma.$transaction(async (tx) => {
-      // Delete face profiles
-      await tx.faceProfile.deleteMany({
-        where: { userId }
-      })
-
-      // Delete sessions
-      await tx.session.deleteMany({
-        where: { userId }
-      })
-
-      // Delete registration steps
-      await tx.registrationStep.deleteMany({
-        where: { userId }
-      })
-
-      // Delete document verifications
-      await tx.documentVerification.deleteMany({
-        where: { userId }
-      })
-
-      // Delete user approvals
-      await tx.userApproval.deleteMany({
-        where: { userId }
-      })
-
-      // Delete face quality logs
-      await tx.faceQualityLog.deleteMany({
-        where: { userId }
-      })
-
-      // Delete enrollments
-      await tx.enrollment.deleteMany({
-        where: { userId }
-      })
-
-      // Delete attendances
-      await tx.attendance.deleteMany({
-        where: { userId }
-      })
-
-      // Finally delete the user
-      await tx.user.delete({
-        where: { id: userId }
-      })
-    })
-
-    return ApiResponseHelper.success(null, 'User deleted successfully')
+    return ApiResponseHelper.success(
+      { deletedCount: result.count },
+      `${result.count} users deleted successfully`
+    )
 
   } catch (error) {
     return handleApiError(error)

@@ -1,10 +1,142 @@
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { requireAuth } from '@/lib/auth'
-import { EmailService } from '@/lib/email'
-import { approveUserSchema } from '@/lib/validation'
 import { ApiResponseHelper, handleApiError } from '@/lib/response'
 import { rateLimit, apiRateLimit } from '@/lib/rate-limit'
+import { z } from 'zod'
+
+const approveUserSchema = z.object({
+  userId: z.string().min(1, 'User ID is required'),
+  action: z.enum(['APPROVE', 'REJECT']),
+  reason: z.string().optional()
+})
+
+const bulkApproveSchema = z.object({
+  userIds: z.array(z.string()).min(1, 'At least one user ID is required'),
+  action: z.enum(['APPROVE', 'REJECT']),
+  reason: z.string().optional()
+})
+
+interface ApprovalStep {
+  userId: string
+  status: 'success' | 'error'
+  message: string
+}
+
+async function processApprovalStep(
+  step: ApprovalStep, 
+  action: 'APPROVE' | 'REJECT', 
+  reason?: string
+): Promise<ApprovalStep> {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: step.userId }
+    })
+
+    if (!user) {
+      return {
+        ...step,
+        status: 'error',
+        message: 'User not found'
+      }
+    }
+
+    if (user.status !== 'PENDING') {
+      return {
+        ...step,
+        status: 'error',
+        message: `User status is already ${user.status}`
+      }
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: step.userId },
+      data: {
+        status: action === 'APPROVE' ? 'ACTIVE' : 'REJECTED',
+        approvedAt: action === 'APPROVE' ? new Date() : null,
+        rejectionReason: action === 'REJECT' ? reason : null,
+        updatedAt: new Date()
+      }
+    })
+
+    return {
+      ...step,
+      status: 'success',
+      message: `User ${action === 'APPROVE' ? 'approved' : 'rejected'} successfully`
+    }
+  } catch (error: any) {
+    return {
+      ...step,
+      status: 'error',
+      message: error.message || 'Unknown error occurred'
+    }
+  }
+}
+
+async function processBulkApproval(
+  userIds: string[], 
+  action: 'APPROVE' | 'REJECT', 
+  reason?: string,
+  tx?: any
+): Promise<ApprovalStep[]> {
+  const results: ApprovalStep[] = []
+  
+  for (const userId of userIds) {
+    const step: ApprovalStep = {
+      userId,
+      status: 'success',
+      message: ''
+    }
+    
+    try {
+      const user = await (tx || prisma).user.findUnique({
+        where: { id: userId }
+      })
+
+      if (!user) {
+        results.push({
+          ...step,
+          status: 'error',
+          message: 'User not found'
+        })
+        continue
+      }
+
+      if (user.status !== 'PENDING') {
+        results.push({
+          ...step,
+          status: 'error',
+          message: `User status is already ${user.status}`
+        })
+        continue
+      }
+
+      await (tx || prisma).user.update({
+        where: { id: userId },
+        data: {
+          status: action === 'APPROVE' ? 'ACTIVE' : 'REJECTED',
+          approvedAt: action === 'APPROVE' ? new Date() : null,
+          rejectionReason: action === 'REJECT' ? reason : null,
+          updatedAt: new Date()
+        }
+      })
+
+      results.push({
+        ...step,
+        status: 'success',
+        message: `User ${action === 'APPROVE' ? 'approved' : 'rejected'} successfully`
+      })
+    } catch (error: any) {
+      results.push({
+        ...step,
+        status: 'error',
+        message: error.message || 'Unknown error occurred'
+      })
+    }
+  }
+  
+  return results
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -14,22 +146,19 @@ export async function POST(request: NextRequest) {
       return ApiResponseHelper.error(rateLimitResult.error!, 429)
     }
 
-    const admin = await requireAuth(request, ['ADMIN'])
+    // Require admin authentication
+    const currentUser = await requireAuth(request, ['ADMIN'])
+
     const body = await request.json()
-    const { userId, ...approvalData } = body
+    const validation = approveUserSchema.safeParse(body)
 
-    if (!userId) {
-      return ApiResponseHelper.error('User ID is required', 400)
-    }
-
-    const validation = approveUserSchema.safeParse(approvalData)
     if (!validation.success) {
       return ApiResponseHelper.validationError(validation.error.flatten().fieldErrors)
     }
 
-    const { status, reason, notes } = validation.data
+    const { userId, action, reason } = validation.data
 
-    // Check if user exists and is pending approval
+    // Check if user exists and is pending
     const user = await prisma.user.findUnique({
       where: { id: userId }
     })
@@ -39,92 +168,44 @@ export async function POST(request: NextRequest) {
     }
 
     if (user.status !== 'PENDING') {
-      return ApiResponseHelper.error('User is not pending approval', 400)
+      return ApiResponseHelper.error(`User status is already ${user.status}`, 400)
     }
 
-    // Check if user has completed all required registration steps
-    const registrationSteps = await prisma.registrationStep.findMany({
-      where: { userId }
-    })
-
-    const requiredSteps = ['BASIC_INFO', 'EMAIL_VERIFICATION', 'FACE_ENROLLMENT']
-    const completedSteps = registrationSteps
-      .filter(step => step.status === 'COMPLETED')
-      .map(step => step.stepName)
-
-    const hasAllRequiredSteps = requiredSteps.every(step => 
-      completedSteps.includes(step as any)
-    )
-
-    if (status === 'APPROVED' && !hasAllRequiredSteps) {
-      return ApiResponseHelper.error(
-        'User has not completed all required registration steps', 
-        400
-      )
-    }
-
-    // Start transaction for approval process
-    const result = await prisma.$transaction(async (tx) => {
-      // Create approval record
-      const approval = await tx.userApproval.create({
-        data: {
-          userId,
-          adminId: admin.id,
-          status,
-          reason,
-          notes,
-          reviewedAt: new Date()
-        }
-      })
-
-      // Update user status
-      const newUserStatus = status === 'APPROVED' ? 'ACTIVE' : 'REJECTED'
-      const updatedUser = await tx.user.update({
-        where: { id: userId },
-        data: {
-          status: newUserStatus,
-          approvedAt: status === 'APPROVED' ? new Date() : null,
-          approvedBy: status === 'APPROVED' ? admin.id : null
-        }
-      })
-
-      return { approval, user: updatedUser }
-    })
-
-    // Send email notification
-    const emailSent = await EmailService.sendRegistrationApproval(
-      result.user.email,
-      result.user.name,
-      status === 'APPROVED',
-      reason
-    )
-
-    if (!emailSent) {
-      console.error('Failed to send approval email to user:', result.user.email)
-    }
-
-    // Send welcome email if approved
-    if (status === 'APPROVED') {
-      await EmailService.sendWelcomeEmail(result.user.email, result.user.name)
-    }
-
-    return ApiResponseHelper.success({
-      approval: result.approval,
-      user: {
-        id: result.user.id,
-        name: result.user.name,
-        email: result.user.email,
-        status: result.user.status,
-        approvedAt: result.user.approvedAt
+    // Update user status
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        status: action === 'APPROVE' ? 'ACTIVE' : 'REJECTED',
+        approvedAt: action === 'APPROVE' ? new Date() : null,
+        rejectionReason: action === 'REJECT' ? reason : null,
+        updatedAt: new Date()
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        status: true,
+        approvedAt: true,
+        rejectionReason: true,
+        updatedAt: true
       }
-    }, `User ${status.toLowerCase()} successfully`)
+    })
+
+    // TODO: Send notification email to user
+    // await sendApprovalNotification(updatedUser, action)
+
+    return ApiResponseHelper.success(
+      updatedUser, 
+      `User ${action === 'APPROVE' ? 'approved' : 'rejected'} successfully`
+    )
 
   } catch (error) {
     return handleApiError(error)
   }
 }
 
-export async function GET(request: NextRequest) {
+export async function PUT(request: NextRequest) {
   try {
     // Rate limiting
     const rateLimitResult = await rateLimit(request, apiRateLimit)
@@ -132,90 +213,34 @@ export async function GET(request: NextRequest) {
       return ApiResponseHelper.error(rateLimitResult.error!, 429)
     }
 
-    const admin = await requireAuth(request, ['ADMIN'])
-    const { searchParams } = new URL(request.url)
-    
-    const page = parseInt(searchParams.get('page') || '1')
-    const limit = parseInt(searchParams.get('limit') || '10')
-    const status = searchParams.get('status') || 'PENDING'
+    // Require admin authentication
+    const currentUser = await requireAuth(request, ['ADMIN'])
 
-    // Get pending approvals count
-    const pendingCount = await prisma.user.count({
-      where: { status: 'PENDING' }
-    })
+    const body = await request.json()
+    const validation = bulkApproveSchema.safeParse(body)
 
-    // Get users based on approval status
-    let whereClause: any = {}
-    
-    if (status === 'PENDING') {
-      whereClause.status = 'PENDING'
-    } else if (status === 'APPROVED') {
-      whereClause.status = 'ACTIVE'
-    } else if (status === 'REJECTED') {
-      whereClause.status = 'REJECTED'
+    if (!validation.success) {
+      return ApiResponseHelper.validationError(validation.error.flatten().fieldErrors)
     }
 
-    const total = await prisma.user.count({
-      where: whereClause
+    const { userIds, action, reason } = validation.data
+
+    // Process bulk approval in transaction
+    const results = await prisma.$transaction(async (tx) => {
+      return await processBulkApproval(userIds, action, reason, tx)
     })
 
-    const users = await prisma.user.findMany({
-      where: whereClause,
-      include: {
-        registrationSteps: {
-          select: {
-            stepName: true,
-            status: true,
-            completedAt: true
-          }
-        },
-        documentVerifications: {
-          select: {
-            documentType: true,
-            status: true,
-            verifiedAt: true
-          }
-        },
-        faceProfiles: {
-          select: {
-            qualityScore: true,
-            createdAt: true
-          }
-        },
-        userApprovals: {
-          where: {
-            status: { in: ['APPROVED', 'REJECTED'] }
-          },
-          include: {
-            admin: {
-              select: {
-                name: true,
-                email: true
-              }
-            }
-          },
-          orderBy: {
-            reviewedAt: 'desc'
-          },
-          take: 1
-        }
-      },
-      orderBy: {
-        createdAt: 'desc'
-      },
-      skip: (page - 1) * limit,
-      take: limit
-    })
+    const successCount = results.filter(r => r.status === 'success').length
+    const errorCount = results.filter(r => r.status === 'error').length
 
-    return ApiResponseHelper.paginated(
-      {
-        users,
-        pendingCount
-      },
-      page,
-      limit,
-      total
-    )
+    return ApiResponseHelper.success({
+      results,
+      summary: {
+        total: userIds.length,
+        success: successCount,
+        errors: errorCount
+      }
+    }, `Bulk ${action.toLowerCase()} completed: ${successCount} successful, ${errorCount} failed`)
 
   } catch (error) {
     return handleApiError(error)

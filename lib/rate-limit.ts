@@ -1,157 +1,113 @@
 import { NextRequest } from 'next/server'
 
-interface RateLimitStore {
-  [key: string]: {
-    count: number
-    resetTime: number
-  }
-}
-
-class InMemoryRateLimit {
-  private store: RateLimitStore = {}
-
-  async limit(identifier: string, maxRequests: number, windowMs: number): Promise<{
-    success: boolean
-    remaining: number
-    resetTime: number
-  }> {
-    const now = Date.now()
-    const windowStart = now - windowMs
-
-    // Clean up expired entries
-    Object.keys(this.store).forEach(key => {
-      if (this.store[key].resetTime < now) {
-        delete this.store[key]
-      }
-    })
-
-    if (!this.store[identifier]) {
-      this.store[identifier] = {
-        count: 1,
-        resetTime: now + windowMs
-      }
-      return {
-        success: true,
-        remaining: maxRequests - 1,
-        resetTime: now + windowMs
-      }
-    }
-
-    const entry = this.store[identifier]
-
-    if (entry.resetTime < now) {
-      entry.count = 1
-      entry.resetTime = now + windowMs
-      return {
-        success: true,
-        remaining: maxRequests - 1,
-        resetTime: now + windowMs
-      }
-    }
-
-    if (entry.count >= maxRequests) {
-      return {
-        success: false,
-        remaining: 0,
-        resetTime: entry.resetTime
-      }
-    }
-
-    entry.count++
-    return {
-      success: true,
-      remaining: maxRequests - entry.count,
-      resetTime: entry.resetTime
-    }
-  }
-}
-
-const rateLimiter = new InMemoryRateLimit()
-
+// Rate limit configuration
 export interface RateLimitConfig {
-  maxRequests: number
-  windowMs: number
-  message?: string
-  keyGenerator?: (request: NextRequest) => string
+  window: number // Time window in seconds
+  limit: number // Max requests per window
+}
+
+// Default rate limits
+export const apiRateLimit: RateLimitConfig = {
+  window: 60, // 1 minute
+  limit: 100 // 100 requests per minute
+}
+
+export const authRateLimit: RateLimitConfig = {
+  window: 60, // 1 minute  
+  limit: 10 // 10 requests per minute
+}
+
+export const uploadRateLimit: RateLimitConfig = {
+  window: 300, // 5 minutes
+  limit: 20 // 20 uploads per 5 minutes
+}
+
+// In-memory store for rate limiting (replace with Redis in production)
+const rateLimitStore = new Map<string, { count: number; resetTime: number }>()
+
+// Clean up expired entries periodically
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, value] of rateLimitStore.entries()) {
+    if (now > value.resetTime) {
+      rateLimitStore.delete(key)
+    }
+  }
+}, 60000) // Clean up every minute
+
+export function getClientIP(request: NextRequest): string {
+  // Try different headers to get the real IP
+  const forwarded = request.headers.get('x-forwarded-for')
+  const realIp = request.headers.get('x-real-ip')
+  const cfConnectingIp = request.headers.get('cf-connecting-ip')
+  
+  if (forwarded) {
+    return forwarded.split(',')[0].trim()
+  }
+  
+  if (realIp) {
+    return realIp.trim()
+  }
+  
+  if (cfConnectingIp) {
+    return cfConnectingIp.trim()
+  }
+  
+  // Fallback to a default value
+  return '127.0.0.1'
+}
+
+export interface RateLimitResult {
+  success: boolean
+  limit: number
+  remaining: number
+  resetTime: number
+  error?: string
 }
 
 export async function rateLimit(
-  request: NextRequest,
+  request: NextRequest, 
   config: RateLimitConfig
-): Promise<{
-  success: boolean
-  headers: Record<string, string>
-  error?: string
-}> {
-  const {
-    maxRequests,
-    windowMs,
-    message = 'Too many requests, please try again later',
-    keyGenerator = defaultKeyGenerator
-  } = config
-
-  const identifier = keyGenerator(request)
-  const result = await rateLimiter.limit(identifier, maxRequests, windowMs)
-
-  const headers = {
-    'X-RateLimit-Limit': maxRequests.toString(),
-    'X-RateLimit-Remaining': result.remaining.toString(),
-    'X-RateLimit-Reset': result.resetTime.toString()
-  }
-
-  if (!result.success) {
+): Promise<RateLimitResult> {
+  const ip = getClientIP(request)
+  const key = `rateLimit:${ip}`
+  const now = Date.now()
+  const windowMs = config.window * 1000
+  
+  const current = rateLimitStore.get(key)
+  
+  if (!current || now > current.resetTime) {
+    // First request in window or window expired
+    const resetTime = now + windowMs
+    rateLimitStore.set(key, { count: 1, resetTime })
+    
     return {
-      success: false,
-      headers,
-      error: message
+      success: true,
+      limit: config.limit,
+      remaining: config.limit - 1,
+      resetTime
     }
   }
-
+  
+  if (current.count >= config.limit) {
+    // Rate limit exceeded
+    return {
+      success: false,
+      limit: config.limit,
+      remaining: 0,
+      resetTime: current.resetTime,
+      error: 'Rate limit exceeded'
+    }
+  }
+  
+  // Increment counter
+  current.count += 1
+  rateLimitStore.set(key, current)
+  
   return {
     success: true,
-    headers
-  }
-}
-
-function defaultKeyGenerator(request: NextRequest): string {
-  const forwarded = request.headers.get('x-forwarded-for')
-  const ip = forwarded ? forwarded.split(',')[0] : request.ip || 'unknown'
-  return `rate_limit:${ip}`
-}
-
-export function createRateLimitMiddleware(config: RateLimitConfig) {
-  return async (request: NextRequest) => {
-    const result = await rateLimit(request, config)
-    return result
-  }
-}
-
-// Predefined rate limit configurations
-export const authRateLimit: RateLimitConfig = {
-  maxRequests: 5,
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  message: 'Too many authentication attempts, please try again later'
-}
-
-export const apiRateLimit: RateLimitConfig = {
-  maxRequests: 100,
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  message: 'Too many API requests, please try again later'
-}
-
-export const faceRecognitionRateLimit: RateLimitConfig = {
-  maxRequests: 10,
-  windowMs: 60 * 1000, // 1 minute
-  message: 'Too many face recognition attempts, please try again later'
-}
-
-export const emailRateLimit: RateLimitConfig = {
-  maxRequests: 3,
-  windowMs: 60 * 60 * 1000, // 1 hour
-  message: 'Too many email requests, please try again later',
-  keyGenerator: (request) => {
-    const body = request.body as any
-    const email = body?.email || 'unknown'
-    return `email_rate_limit:${email}`
+    limit: config.limit,
+    remaining: config.limit - current.count,
+    resetTime: current.resetTime
   }
 }
