@@ -49,6 +49,7 @@
     "@tanstack/react-query-devtools": "^5.17.7",
     "@types/bcrypt": "^5.0.2",
     "@types/jsonwebtoken": "^9.0.5",
+    "@upstash/ratelimit": "^2.0.6",
     "autoprefixer": "^10.4.20",
     "bcrypt": "^5.1.1",
     "class-variance-authority": "^0.7.1",

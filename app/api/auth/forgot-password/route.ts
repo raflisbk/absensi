@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { ApiResponseHelper, handleApiError } from '@/lib/response'
-import { rateLimit, emailRateLimit } from '@/lib/rate-limit'
+import { rateLimit, apiRateLimit } from '@/lib/rate-limit'
 import { forgotPasswordSchema } from '@/lib/validation'
 import { EmailService } from '@/lib/email'
 import { AuthService } from '@/lib/auth'
@@ -9,7 +9,7 @@ import { AuthService } from '@/lib/auth'
 export async function POST(request: NextRequest) {
   try {
     // Rate limiting for password reset requests
-    const rateLimitResult = await rateLimit(request, emailRateLimit)
+    const rateLimitResult = await rateLimit(request, apiRateLimit)
     if (!rateLimitResult.success) {
       return ApiResponseHelper.error(
         'Too many password reset requests. Please try again later.',

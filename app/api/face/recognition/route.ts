@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { requireAuth } from '@/lib/auth'
 import { ApiResponseHelper, handleApiError } from '@/lib/response'
-import { rateLimit, faceRecognitionRateLimit } from '@/lib/rate-limit'
+import { rateLimit, defaultRateLimit } from '@/lib/rate-limit'
 import { faceRecognitionSchema } from '@/lib/validation'
 
 // Face similarity threshold
@@ -86,7 +86,7 @@ function calculateGPSDistance(lat1: number, lng1: number, lat2: number, lng2: nu
 export async function POST(request: NextRequest) {
   try {
     // Rate limiting
-    const rateLimitResult = await rateLimit(request, faceRecognitionRateLimit)
+    const rateLimitResult = await rateLimit(request, defaultRateLimit)
     if (!rateLimitResult.success) {
       return ApiResponseHelper.error(rateLimitResult.error!, 429)
     }
