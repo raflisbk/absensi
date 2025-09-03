@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { AuthService } from '@/lib/auth'
+import { AuthService } from '@/lib/auth-service'
 import { EmailService } from '@/lib/email'
 import { registerSchema } from '@/lib/validation'
 import { ApiResponseHelper, handleApiError } from '@/lib/response'

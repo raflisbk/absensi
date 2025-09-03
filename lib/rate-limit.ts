@@ -22,6 +22,22 @@ export const uploadRateLimit: RateLimitConfig = {
   limit: 20 // 20 uploads per 5 minutes
 }
 
+// Added missing exports
+export const faceRecognitionRateLimit: RateLimitConfig = {
+  window: 60, // 1 minute
+  limit: 30 // 30 requests per minute (for face operations)
+}
+
+export const defaultRateLimit: RateLimitConfig = {
+  window: 60, // 1 minute
+  limit: 60 // 60 requests per minute (general purpose)
+}
+
+export const emailRateLimit: RateLimitConfig = {
+  window: 300, // 5 minutes
+  limit: 5 // 5 emails per 5 minutes
+}
+
 // In-memory store for rate limiting (replace with Redis in production)
 const rateLimitStore = new Map<string, { count: number; resetTime: number }>()
 

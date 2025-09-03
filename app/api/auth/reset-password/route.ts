@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/prisma'
-import { AuthService } from '@/lib/auth'
+import { AuthService } from '@/lib/auth-service'
 import { resetPasswordSchema } from '@/lib/validation'
 import { ApiResponseHelper, handleApiError } from '@/lib/response'
 import { rateLimit, authRateLimit } from '@/lib/rate-limit'

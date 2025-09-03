@@ -207,36 +207,20 @@ export async function POST(request: NextRequest) {
         faceMatchScore: similarity,
         wifiSsid: wifiSsid || null,
         gpsCoordinates: gpsLat && gpsLng ? JSON.stringify({ lat: gpsLat, lng: gpsLng }) : null,
-        deviceInfo: deviceInfo ? JSON.stringify(deviceInfo) : null,
-        createdAt: now,
-        updatedAt: now
-      },
-      include: {
-        class: {
-          select: {
-            id: true,
-            name: true,
-            code: true,
-            room: {
-              select: {
-                name: true,
-                building: true
-              }
-            }
-          }
-        }
+        deviceInfo: deviceInfo ? JSON.stringify(deviceInfo) : null
       }
     })
 
-    return ApiResponseHelper.created(
+    return ApiResponseHelper.success(
       {
         id: attendance.id,
         status: attendance.status,
         checkInTime: attendance.checkInTime,
         faceMatchScore: attendance.faceMatchScore,
-        class: attendance.class
+        className: enrollment.class.name,
+        roomName: enrollment.class.room?.name
       },
-      `Attendance recorded successfully as ${status}`
+      `Attendance recorded successfully. Status: ${status}`
     )
 
   } catch (error) {

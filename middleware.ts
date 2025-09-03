@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { AuthService } from '@/lib/auth'
+import { EdgeAuthUtils } from '@/lib/auth'
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
@@ -55,32 +55,12 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL('/login', request.url))
   }
 
-  // Verify token
+  // Verify token (without database access for edge compatibility)
   try {
-    const payload = AuthService.verifyToken(token)
+    const payload = EdgeAuthUtils.verifyToken(token)
     
     if (!payload) {
       throw new Error('Invalid token')
-    }
-
-    // Validate session if it's an API route
-    if (pathname.startsWith('/api/')) {
-      const session = await AuthService.validateSession(payload.sessionId)
-      
-      if (!session) {
-        return NextResponse.json(
-          { success: false, error: 'Session expired' },
-          { status: 401 }
-        )
-      }
-
-      // Check role-based access
-      if (pathname.startsWith('/api/admin/') && payload.role !== 'ADMIN') {
-        return NextResponse.json(
-          { success: false, error: 'Insufficient permissions' },
-          { status: 403 }
-        )
-      }
     }
 
     // For pages, check role-based access
@@ -94,6 +74,14 @@ export async function middleware(request: NextRequest) {
       requestHeaders.set('x-user-id', payload.userId)
       requestHeaders.set('x-user-role', payload.role)
       requestHeaders.set('x-session-id', payload.sessionId)
+
+      // Check role-based access for admin API routes
+      if (pathname.startsWith('/api/admin/') && payload.role !== 'ADMIN') {
+        return NextResponse.json(
+          { success: false, error: 'Insufficient permissions' },
+          { status: 403 }
+        )
+      }
 
       return NextResponse.next({
         request: {

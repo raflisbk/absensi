@@ -4,7 +4,7 @@ import { ApiResponseHelper, handleApiError } from '@/lib/response'
 import { rateLimit, apiRateLimit } from '@/lib/rate-limit'
 import { forgotPasswordSchema } from '@/lib/validation'
 import { EmailService } from '@/lib/email'
-import { AuthService } from '@/lib/auth'
+import { AuthService } from '@/lib/auth-service'
 
 export async function POST(request: NextRequest) {
   try {
